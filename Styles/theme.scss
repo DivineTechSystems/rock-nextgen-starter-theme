@@ -2,23 +2,75 @@
 //
 // BUILD: npm run build   (dart-sass -> Styles/theme.css)
 //
-// theme.css is MACHINE-OWNED once deployed: Rock's ThemeService.BuildTheme
-// rewrites the marker regions below in place whenever theme settings are saved
-// in the admin fields editor. Never hand-edit theme.css; edit this file (or the
-// partials it imports) and rebuild.
+// ---------------------------------------------------------------------------
+// theme.css IS A BUILD OUTPUT WITH TWO INPUTS
 //
-// MARKER STRINGS ARE A ROCK CONSTANT — DO NOT REWORD THEM.
-// Rock v18's Rock.Cms.ThemeOverrideBuilder holds them as exact literals:
+// Never hand-edit theme.css. It is assembled from:
+//   1. this file, compiled by dart-sass on your machine  (author-owned)
+//   2. the theme's admin settings, held in the DATABASE  (admin-owned)
+//
+// Admin settings are never stored in theme.css. They live in
+// Theme.AdditionalSettingsJson, deserialized as ThemeCustomizationSettings
+// (VariableValues, CustomOverrides, EnabledIconSets, FontAwesome weights).
+// ThemeService.BuildTheme reads theme.css off disk, strips @charset and both
+// marker regions from what it read, then writes back:
+//
+//     @charset "UTF-8";
+//     /* CSS Overrides Top Start */      icon-set @imports, fingerprinted
+//     /* CSS Overrides Top End */
+//     <everything this file compiled to, verbatim>
+//     /* CSS Overrides Bottom Start */   :root { --var: value; } + custom CSS
+//     /* CSS Overrides Bottom End */
+//
+// So `npm run watch` overwriting theme.css does NOT lose an admin's settings —
+// it only drops the rendered copy of them. Rock re-bakes them on:
+//   * any Save in the theme editor — Theme.SaveHook publishes
+//     ThemeWasUpdatedMessage, ThemeWasUpdatedConsumer calls BuildTheme
+//     (bus-based, so it fans out across a web farm);
+//   * every application start — Global.asax.cs CompileThemesThread calls
+//     ThemeService.CompileAll, rebuilding every non-legacy theme.
+//
+// That startup pass is the reconciliation step. The file on disk is EXPECTED
+// to drift from the database — a deploy, an xcopy, a git checkout, your sass
+// watch. When iterating against a live site, just make sure Rock writes last:
+// rebuild, then save in the theme editor or recycle the app pool. BuildTheme
+// re-reads from disk every time, so there is no ordering trap.
+//
+// Rock emits DEFAULTS, not just admin deltas: VariableThemeField's
+// GetValueOrDefault falls back to the theme.json `default`, and every
+// variable-backed field emits. After any build the bottom :root carries every
+// field whether an admin touched it or not — which is why theme.json's
+// defaults, and the matching _tokens.scss declarations, are the real palette.
+//
+// ---------------------------------------------------------------------------
+// THE MARKER COMMENTS
+//
+// Verified against Rock 18.4.1, Rock.Cms.ThemeOverrideBuilder. The four
+// literals are exact constants — reproduce them byte for byte:
 //   TopOverrideStartMarker    "/* CSS Overrides Top Start */"
 //   TopOverrideEndMarker      "/* CSS Overrides Top End */"
 //   BottomOverrideStartMarker "/* CSS Overrides Bottom Start */"
 //   BottomOverrideEndMarker   "/* CSS Overrides Bottom End */"
-// The word "Start" is load-bearing: without it Rock's strip regex matches zero
-// bytes, the region is never rewritten, and nothing declared in theme.json —
-// including base-primary — ever reaches the browser. Rock writes the icon-set
-// @imports into the Top region and the theme.json variable values (plus any
-// admin "custom CSS overrides") into the Bottom region.
 //
+// They are NOT a required input. Build() re-emits both regions with correct
+// markers regardless of what it found, so a theme.css carrying no markers at
+// all still works. Their only job is to let the NEXT build find and delete the
+// region the PREVIOUS build wrote, so generated output does not accumulate.
+//
+// The real hazard is a HALF PAIR. TopOverridePattern and BottomOverridePattern
+// are `Start .* End` compiled with RegexOptions.Singleline and a greedy `.*`,
+// so an orphan Start marker sitting above this file's content, paired with a
+// generated End marker below it, matches straight through the middle and
+// strips the entire compiled stylesheet on the next build. Duplicated markers
+// are the same failure: the match runs from the first Start to the last End.
+//
+// Hence the convention here — ship both pairs, complete and adjacent, Top at
+// the very top and Bottom at the very bottom. That is idempotent under
+// repeated builds and leaves no way to form a straddling match.
+// tools/check-theme.mjs enforces pairing, order and position, not mere
+// presence.
+//
+// ---------------------------------------------------------------------------
 // ORDERING (verified against dart-sass 1.x):
 // All `@use` rules must precede any other rule in this file, including the
 // plain-CSS `@import` of core.css below — reversing them is a hard compile
@@ -30,6 +82,7 @@
 // content. So core.css still loads before this theme's own rules in the
 // browser, and the `:root` declarations in _tokens.scss win over core's
 // defaults at equal specificity because they appear later in the file.
+// ---------------------------------------------------------------------------
 
 /* CSS Overrides Top Start */
 /* CSS Overrides Top End */

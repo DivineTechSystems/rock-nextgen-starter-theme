@@ -2,22 +2,28 @@
 //
 // Asserts three contracts that fail silently at runtime if broken:
 //
-// 1. MARKERS — Rock's ThemeOverrideBuilder rewrites theme.css in place using
-//    four exact literal markers. If any is missing or reworded (the classic
-//    mistake is dropping the word "Start"), Rock's strip regex matches zero
-//    bytes and nothing configured in the admin fields editor ever reaches the
-//    browser — including the brand's primary color.
+// 1. MARKERS — the four `/* CSS Overrides ... */` literals that Rock's
+//    ThemeOverrideBuilder uses to locate its generated regions. Presence is
+//    NOT the contract: Build() re-emits both regions with correct markers
+//    whatever it found, so a file with no markers still works. What matters is
+//    that the markers we ship can never form a region that straddles real CSS
+//    — see the checkMarkers comment for the destructive case.
 //
 // 2. TOKEN SYNC — every theme.json field `default` must match the value
 //    declared in Styles/_tokens.scss. core.css declares every --base-* token
 //    itself, so a var() fallback aimed at a core token is dead code; _tokens'
-//    :root declarations are the only thing making theme.json defaults real.
+//    :root declarations are the only thing making theme.json defaults real
+//    before Rock's first build of the theme.
 //
 // 3. IMPORT ORDER — dart-sass passes a literal ".css" @import through
 //    verbatim. Browsers silently DROP any CSS @import that appears after the
 //    first style rule, which reads as "the token system isn't loading" with no
 //    error anywhere. Verify every @import in the compiled file precedes the
 //    first rule.
+//
+// SCOPE: run this against the repo's own source and build output. A theme.css
+// that Rock has already rebuilt on a server legitimately carries a @charset
+// line and non-empty override regions, and will fail check 1 by design.
 
 import { readFileSync } from 'node:fs';
 
@@ -34,23 +40,80 @@ const pass = msg => console.log(`PASS ${msg}`);
 
 // --- 1. Markers --------------------------------------------------------------
 
-const MARKERS = [
-  '/* CSS Overrides Top Start */',
-  '/* CSS Overrides Top End */',
-  '/* CSS Overrides Bottom Start */',
-  '/* CSS Overrides Bottom End */',
+const MARKERS = {
+  topStart: '/* CSS Overrides Top Start */',
+  topEnd: '/* CSS Overrides Top End */',
+  bottomStart: '/* CSS Overrides Bottom Start */',
+  bottomEnd: '/* CSS Overrides Bottom End */',
+};
+
+const PAIRS = [
+  ['topStart', 'topEnd', 'Top'],
+  ['bottomStart', 'bottomEnd', 'Bottom'],
 ];
+
+// Rock's TopOverridePattern / BottomOverridePattern are `Start .* End`, compiled
+// with RegexOptions.Singleline and a greedy `.*`. Every failure below is a way
+// to make that match span content it must not touch:
+//
+//   half a pair   an orphan Start above our CSS, plus the End that Rock's next
+//                 build writes below it, brackets the whole stylesheet — the
+//                 build after that strips it;
+//   duplicates    the match runs from the FIRST Start to the LAST End;
+//   wrong order   or interleaved regions, same straddle by another route.
+//
+// Authoring inside a region is a quieter failure: Rock owns those bytes and
+// discards whatever it finds there on the next build.
+function checkMarkers(file, src) {
+  const before = failed;
+  const at = {};
+
+  for (const [key, marker] of Object.entries(MARKERS)) {
+    const count = src.split(marker).length - 1;
+    if (count > 1) {
+      fail(`${file}: ${marker} appears ${count} times — Rock's strip regex is greedy and Singleline, so it matches from the first Start to the last End and deletes everything between`);
+    }
+    at[key] = count >= 1 ? src.indexOf(marker) : -1;
+  }
+
+  for (const [startKey, endKey, label] of PAIRS) {
+    const hasStart = at[startKey] >= 0;
+    const hasEnd = at[endKey] >= 0;
+
+    if (hasStart !== hasEnd) {
+      fail(`${file}: ${label} override markers are a half pair (${hasStart ? 'Start' : 'End'} only) — Rock writes the missing one on its next build and the resulting region swallows this file's CSS`);
+    } else if (!hasStart) {
+      fail(`${file}: ${label} override markers are missing — Rock re-adds them, but this theme ships both pairs so repeated builds stay idempotent`);
+    } else if (at[startKey] > at[endKey]) {
+      fail(`${file}: ${label} End marker precedes its Start marker`);
+    }
+  }
+
+  // Positional checks only make sense once every pair is intact.
+  if (failed !== before) return;
+
+  if (at.topEnd > at.bottomStart) {
+    fail(`${file}: the Top and Bottom override regions interleave`);
+  }
+  if (src.slice(0, at.topStart).trim() !== '') {
+    fail(`${file}: content precedes the Top Start marker — the Top region must sit at the head of the file`);
+  }
+  if (src.slice(at.topStart + MARKERS.topStart.length, at.topEnd).trim() !== '') {
+    fail(`${file}: the Top override region is not empty — Rock owns its contents and discards anything authored there`);
+  }
+  if (src.slice(at.bottomStart + MARKERS.bottomStart.length, at.bottomEnd).trim() !== '') {
+    fail(`${file}: the Bottom override region is not empty — Rock owns its contents and discards anything authored there`);
+  }
+  if (src.slice(at.bottomEnd + MARKERS.bottomEnd.length).trim() !== '') {
+    fail(`${file}: content follows the Bottom End marker — the Bottom region must sit at the end of the file`);
+  }
+}
 
 for (const file of ['Styles/theme.scss', 'Styles/theme.css']) {
   const src = file.endsWith('.scss') ? stripLineComments(read(file)) : read(file);
-  for (const marker of MARKERS) {
-    const count = src.split(marker).length - 1;
-    if (count !== 1) {
-      fail(`${file}: marker ${JSON.stringify(marker)} appears ${count} time(s), expected exactly 1`);
-    }
-  }
+  checkMarkers(file, src);
 }
-if (!failed) pass('all four Rock override markers present exactly once in theme.scss and theme.css');
+if (!failed) pass('override markers are complete, ordered and positioned in theme.scss and theme.css');
 
 // --- 2. theme.json defaults vs _tokens.scss -----------------------------------
 
